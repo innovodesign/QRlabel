@@ -1,54 +1,99 @@
-﻿using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Drawing;
-using System.Data;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using System.Windows.Forms;
-using ZXing;
-using System.IO;
-using ZXing.QrCode;
+﻿using System; // Provides base types and fundamental classes
+using System.Collections.Generic; // For generic collections like List<T>
+using System.ComponentModel; // For component model support
+using System.Drawing; // For drawing graphics, colors, etc.
+using System.Data; // For data-related classes (not used here)
+using System.Linq; // For LINQ operations
+using System.Security.Cryptography; // For the random serial number generator
+using System.Text; // For string manipulation
+using System.Threading.Tasks; // For async tasks (not used here)
+using System.Windows.Forms; // For Windows Forms UI components
+using ZXing; // For barcode generation
+using System.IO; // For file input/output operations
+using ZXing.QrCode; // For QR code generation
 
 namespace a4label
 {
+    // UserControl for label layout and printing logic
     public partial class LabelLayout : UserControl
     {
-
+        // Origin point for the label grid (in millimeters)
         public PointF origin = new PointF(18.14f, 20.35f + 20.87f);
+
+        // Pitch (distance between labels) in millimeters
         public SizeF pitch = new SizeF(21.0f, 20.87f);
+
+        // List of items to print on each label (text, QR, etc.)
         public List<Printable> labelItems = new List<Printable>();
+
+        // Dictionary of fields for variable substitution in label text
         Dictionary<string, string> fields = new Dictionary<string, string>();
+
+        // History of printed label ranges
         public List<PrintRecord> history = new List<PrintRecord>();
 
-        private int serialNum;
-        private int firstNum, lastNum;
-        public int lastPrintedSerno = -1;
+        // Current serial number for printing
+        private decimal serialNum;
+
+        // First and last serial numbers in the current print range
+        private decimal firstNum, lastNum;
+
+        // Last printed serial number
+        public decimal lastPrintedSerno = -1;
+
+        // Last printed version string
         public string lastPrintedVersion = "";
+
+        // Number of labels across the page
         public int repeatAcross = 1;
+
+        // Number of labels down the page
         public int repeatDown = 1;
-        private int validSerialMin;
-        private int validSerialMax;
+
+        // Minimum valid serial number
+        public decimal validSerialMin = 0;
+
+        // Maximum valid serial number
+        public decimal validSerialMax = (decimal)UInt64.MaxValue;
+
+        // Whether to use random serial numbers
+        public bool randomSerialNumber = false;
+
+        // List of error messages from layout parsing
         public List<string> errors = new List<string>();
 
-
+        // List of overlapping print ranges in history
         public List<string> overlaps = new List<string>();
 
+        // Constructor: initializes the control and its components
         public LabelLayout()
         {
             InitializeComponent();
         }
 
+        // Property for accessing the current serial number
+        public decimal SerialNum
+        {
+            get { return serialNum; }
+            set { serialNum = value; }
+        }
+
+        // Paint event handler for the label layout (invalidates panel)
         private void LabelLayout_Paint(object sender, PaintEventArgs e)
         {
             panel1.Invalidate();
         }
 
-
+        // Replaces variable fields in text with actual values, supports recursion
         public string fix(string text, int tries)
         {
+            string[] hexMatch = new string[] {
+                "[X]", "[XX]", "[XXX]", "[XXXX]", "[XXXXX]", "[XXXXXX]", "[XXXXXXX]", "[XXXXXXXX]", "[XXXXXXXXX]",
+                "[XXXXXXXXXX]", "[XXXXXXXXXXX]", "[XXXXXXXXXXXX]", "[XXXXXXXXXXXXX]", "[XXXXXXXXXXXXXX]",
+                "[XXXXXXXXXXXXXXX]", "[XXXXXXXXXXXXXXXX]"
+            };
             string old = text;
+            // Replace serial number placeholders
             if (text.Contains("[NNNNNN]"))
                 text = text.Replace("[NNNNNN]", serialNum.ToString("000000"));
             else if (text.Contains("[NNNNN]"))
@@ -62,27 +107,42 @@ namespace a4label
             else if (text.Contains("[N]"))
                 text = text.Replace("[N]", serialNum.ToString());
             else if (text.Contains("[MAC12]"))
-                text = text.Replace("[MAC12]", ((serialNum / 256) & 0x0f).ToString("X") + "-" + (serialNum & 255).ToString("X2"));
+                text = text.Replace("[MAC12]", (((uint)serialNum / 256) & 0x0f).ToString("X") + "-" + ((uint)serialNum & 255).ToString("X2"));
+            else foreach (string match in hexMatch)
+                    if (text.Contains(match))
+                        text = fixHex(text, match);
 
+            // Replace custom fields
             foreach (string key in fields.Keys)
             {
                 if (text.Contains(key))
                     text = text.Replace(key, fields[key]);
             }
 
+            // Recursively fix text if changes were made
             if ((old != text) && (tries > 0))
                 return fix(text, tries - 1);
             return text;
         }
 
+        // Helper for replacing hexadecimal placeholders in text
+        private string fixHex(string text, string match)
+        {
+            int len = match.Length - 2;
+            string formatter = "X" + len.ToString();
+            string s = ((UInt64)serialNum).ToString(formatter); // zero padded to at least len digits
+            s = s.Substring(s.Length - len);
+            return text.Replace(match, s);
+        }
 
+        // Checks if the current serial number range is valid for printing
         internal bool canPrint()
         {
             return !((serialNum < validSerialMin) || (lastNum > validSerialMax));
         }
 
-
-        internal void setRange(int start, int count)
+        // Sets the serial number range for printing
+        internal void setRange(long start, long count)
         {
             if (serialNum != start)
             {
@@ -93,13 +153,13 @@ namespace a4label
             lastNum = serialNum + count - 1;
         }
 
-
+        // Returns the number of labels per page
         internal int labelsPerPage()
         {
             return repeatDown * repeatAcross;
         }
 
-
+        // Reads and parses the layout script, populates label items and fields
         internal string[] readSettings(string text)
         {
             errors.Clear();
@@ -109,14 +169,13 @@ namespace a4label
             fields.Add("[QRlink]", "?");
             fields.Add("[version]", "?");
             int line = 0;
-            int first = 1;
+            decimal first = 1;
             validSerialMin = 0;
-            validSerialMax = int.MaxValue;
+            validSerialMax = long.MaxValue;
             lastPrintedSerno = -1;
             repeatAcross = 1;
             repeatDown = 1;
             Pen pen = new Pen(Color.Black, 0.3f);
-
             Font font = new Font("Verdana", 6);
 
             StringReader sr = new StringReader(text);
@@ -128,6 +187,7 @@ namespace a4label
                     break;
                 try
                 {
+                    // Parse field assignments
                     if ((ln.IndexOf('[') == 0) && (ln.IndexOf("]=") > 0))
                     {
                         string name = ln.Substring(0, ln.IndexOf("]=") + 1);
@@ -136,11 +196,10 @@ namespace a4label
                             fields[name] = value;
                         else
                             fields.Add(name, value);
-
                         if (name == "[version]")
                             lastPrintedVersion = value;
-
                     }
+                    // Parse layout settings
                     else if (ln.StartsWith("topleft:"))
                     {
                         string[] s = ln.Substring(8).Split(',');
@@ -161,19 +220,21 @@ namespace a4label
                     }
                     else if (ln.StartsWith("valid_serial_min:"))
                     {
-                        validSerialMin = int.Parse(ln.Substring(17));
+                        validSerialMin = decimal.Parse(ln.Substring(17));
                     }
                     else if (ln.StartsWith("valid_serial_max:"))
                     {
-                        validSerialMax = int.Parse(ln.Substring(17));
+                        validSerialMax = decimal.Parse(ln.Substring(17));
+                    }
+                    else if (ln.StartsWith("random_serial:"))
+                    {
+                        randomSerialNumber = ln.Contains("true");
                     }
                     else if (ln.StartsWith("clear:"))
                     {
                         labelItems.Clear();
                         pen = new Pen(Color.Black, 0.3f);
                         font = new Font("Verdana", 6);
-
-
                     }
                     else if (ln.StartsWith("font:"))
                     {
@@ -187,6 +248,7 @@ namespace a4label
                             pen = new Pen(Color.FromName(s[0]));
                         pen = new Pen(Color.FromName(s[0]), float.Parse(s[1]));
                     }
+                    // Parse label items
                     else if (ln.StartsWith("text:"))
                     {
                         labelItems.Add(new HText(this, ln, font));
@@ -211,6 +273,7 @@ namespace a4label
                     {
                         labelItems.Add(new GraphicFile(this, ln));
                     }
+                    // Parse print history
                     else if (ln.StartsWith("PRINTED:"))
                     {
                         PrintRecord pr = new PrintRecord(ln);
@@ -222,12 +285,13 @@ namespace a4label
                             lastPrintedVersion = pr.version;
                             fields["[version]"] = pr.version;
                         }
-
                     }
+                    // Ignore empty or comment lines
                     else if (ln.Trim() == "")
                     { }
                     else if (ln.StartsWith("\\") || ln.StartsWith("/"))
                     { }
+                    // Unrecognized line: add error
                     else
                     {
                         errors.Add("Line " + line.ToString() + " :" + ln + " ???");
@@ -239,13 +303,12 @@ namespace a4label
                 }
             }
 
-            resizeLabel();
+            resizeLabel(); // Adjust preview panel size
             return errors.ToArray();
         }
 
-
-
-        internal string pageFit()
+        // Returns a string describing how labels fit on the page
+        internal string pageFit(bool isRandom)
         {
             string s = "";
             if (labelsPerPage() <= 0)
@@ -253,10 +316,11 @@ namespace a4label
                 return "Define labels per sheet with 'across:N' and 'down:N' ";
             }
 
-            int pages = (lastNum - serialNum) / labelsPerPage() + 1;
-            int wasted = pages * labelsPerPage() - (lastNum - serialNum + 1);
+            decimal pages = (lastNum - serialNum) / labelsPerPage() + 1;
+            decimal wasted = pages * labelsPerPage() - (lastNum - serialNum + 1);
 
-            s += "First:" + firstNum.ToString() + " Last:" + (lastNum.ToString()) + "   ";
+            if (!isRandom)
+                s += "First:" + firstNum.ToString() + " Last:" + (lastNum.ToString()) + "   ";
 
             if (pages == 1)
                 s += "1 page";
@@ -279,14 +343,14 @@ namespace a4label
             return s;
         }
 
-
+        // Sets the version field and refreshes the control
         internal void setVersion(string text)
         {
             fields["[version]"] = text;
             this.Invalidate();
         }
 
-
+        // Adds a new print record to history and returns its string
         internal string addHistory()
         {
             PrintRecord pr = new PrintRecord(DateTime.Now, firstNum, lastNum, fields["[version]"]);
@@ -294,21 +358,19 @@ namespace a4label
             return "PRINTED:" + pr.ToString();
         }
 
-
+        // Evaluates a string expression (supports math and field substitution)
         public float eval(string v)
         {
-            // recursive expression evaluation
             v = v.Trim();
             if (v.StartsWith("-"))
                 return -eval(v.Substring(1));
 
-            // We are searching for the least priorty operator, doing add/subtrace before multiply divide.
-            // Find the first operator (+,-,*,/) that is not inside bracket for the moment
             int pos = -1;
             int addSubAt = -1;
             int multDivAt = -1;
             int brkts = 0;
 
+            // Find operator position outside brackets
             for (int n = 0; n < v.Length; n++)
             {
                 if (v[n] == '(')
@@ -324,13 +386,14 @@ namespace a4label
             if (brkts != 0)
                 throw new Exception("Brackets mismatch : " + v);
 
-            if(addSubAt!=-1)
+            if (addSubAt != -1)
                 pos = addSubAt;
             else
                 pos = multDivAt;
 
-            if (pos == -1)  // we haven't found an operator, so evaluate a unary value,
+            if (pos == -1)
             {
+                // No operator: evaluate as value or field
                 if (v.StartsWith("(") && v.EndsWith(")"))
                     return eval(v.Substring(1, v.Length - 2));
                 else if (v == "cx")
@@ -353,13 +416,14 @@ namespace a4label
                     return val;
                 }
             }
-            else // we have found an operator, so evaluate both sides and do the operation
+            else
             {
+                // Operator found: evaluate both sides
                 string a = v.Substring(0, pos);
                 string b = v.Substring(pos + 1);
                 char op = v[pos];
 
-                if ((a.Trim()=="")||(b.Trim()==""))
+                if ((a.Trim() == "") || (b.Trim() == ""))
                     throw new Exception("Bad value : " + v);
 
                 if (op == '*')
@@ -374,12 +438,28 @@ namespace a4label
             return 0;
         }
 
-          internal string version()
+        // Returns the current version string
+        internal string version()
         {
             return fields["[version]"];
         }
 
+        // One cryptographic generator for every random serial number. System.Random must not
+        // be used here: it is seeded from the clock, so its output can be predicted and two
+        // instances created in the same clock tick return the same values.
+        private static readonly RandomNumberGenerator serialRng = RandomNumberGenerator.Create();
 
+        // Returns a random serial number from validSerialMin to validSerialMax.
+        // Serials are not checked for duplicates.
+        public decimal makeRandom()
+        {
+            byte[] buffer = new byte[8];
+            serialRng.GetBytes(buffer);
+            decimal range = validSerialMax - validSerialMin + 1;
+            return (BitConverter.ToUInt64(buffer, 0) % range) + validSerialMin;
+        }
+
+        // Draws all label items on the provided graphics canvas
         internal void drawOn(Graphics canvas)
         {
             System.Drawing.Drawing2D.GraphicsState transState = canvas.Save();
@@ -388,23 +468,63 @@ namespace a4label
             canvas.Restore(transState);
         }
 
-        internal void drawPage(int start, int n, Graphics canvas)
+        // Draws a page of labels with sequential serial numbers
+        public void drawPage(decimal start, int n, Graphics canvas)
         {
-
             serialNum = start;
             canvas.PageUnit = GraphicsUnit.Millimeter;
+            var initialState = canvas.Save();
             canvas.TranslateTransform(origin.X, origin.Y);
 
             for (int nn = 0; nn < n; nn++)
             {
+                var labelState = canvas.Save();
+
+                int row = nn / repeatAcross;
+                int col = nn % repeatAcross;
+
+                canvas.TranslateTransform(col * pitch.Width, row * pitch.Height);
+
                 drawOn(canvas);
-                serialNum++;
-                canvas.TranslateTransform(pitch.Width, 0);
-                if (((nn + 1) % repeatAcross) == 0)
-                    canvas.TranslateTransform(-pitch.Width * repeatAcross, pitch.Height);
+
+                canvas.Restore(labelState);
+
+                if (randomSerialNumber)
+                    serialNum = makeRandom();
+                else
+                    serialNum++;
             }
+
+            canvas.Restore(initialState);
         }
 
+        // Draws a page of labels with a list of random serial numbers
+        public void drawPage(List<decimal> serials, Graphics canvas)
+        {
+            canvas.PageUnit = GraphicsUnit.Millimeter;
+            var initialState = canvas.Save();
+            canvas.TranslateTransform(origin.X, origin.Y);
+
+            int n = serials.Count;
+            for (int nn = 0; nn < n; nn++)
+            {
+                var labelState = canvas.Save();
+
+                int row = nn / repeatAcross;
+                int col = nn % repeatAcross;
+
+                canvas.TranslateTransform(col * pitch.Width, row * pitch.Height);
+
+                serialNum = serials[nn];
+                drawOn(canvas);
+
+                canvas.Restore(labelState);
+            }
+
+            canvas.Restore(initialState);
+        }
+
+        // Resizes the label preview panel based on pitch and control size
         private void resizeLabel()
         {
             if ((pitch.Width == 0) || (pitch.Height == 0))
@@ -421,6 +541,7 @@ namespace a4label
             panel1.Left = (this.Width - panel1.Width) / 2;
         }
 
+        // Paint event handler for the preview panel
         private void panel1_Paint(object sender, PaintEventArgs e)
         {
             e.Graphics.FillRectangle(Brushes.Beige, e.Graphics.ClipBounds);
@@ -429,10 +550,10 @@ namespace a4label
             e.Graphics.ScaleTransform(scale, scale);
 
             e.Graphics.PageUnit = GraphicsUnit.Millimeter;
-            //       e.Graphics.DrawRectangle(Pens.Blue, 0, 0, pitch.Width, pitch.Height);
             drawOn(e.Graphics);
         }
 
+        // Resize event handler for the control
         private void LabelLayout_Resize(object sender, EventArgs e)
         {
             resizeLabel();
@@ -440,48 +561,54 @@ namespace a4label
         }
     }
 
+    // Base class for printable items on a label
     public class Printable
     {
-        internal const float scale = 100 / 25.4f;
-        internal float X;
-        internal float Y;
-        internal string type = "";
-        internal string text = "";
-        internal LabelLayout label;
+        internal const float scale = 100 / 25.4f; // Conversion factor for mm to pixels
+        internal float X; // X position
+        internal float Y; // Y position
+        internal string type = ""; // Type of item (text, line, etc.)
+        internal string text = ""; // Text content
+        internal LabelLayout label; // Reference to parent label layout
 
+        // Constructor: parses item type and parameters
         public Printable(LabelLayout label, string s)
         {
             this.label = label;
             type = s.Substring(0, s.IndexOf(':'));
             parse(s.Substring(s.IndexOf(':') + 1).Split(','));
-
         }
 
+        // Evaluates a string expression using label's eval
         public float eval(string s)
         {
             return label.eval(s);
         }
 
+        // Returns text with fields replaced
         public string fixedText()
         {
             return label.fix(text, 10);
         }
 
-
+        // Parses parameters for the item (to be overridden)
         internal virtual void parse(string[] p)
         {
             throw new NotImplementedException();
         }
 
+        // Draws the item on the canvas (to be overridden)
         public virtual void draw(Graphics canvas)
         {
             throw new NotImplementedException();
         }
     }
 
+    // Printable text item
     public class HText : Printable
     {
         internal Font font = new Font("Verdana", 6);
+
         public HText(LabelLayout label, string s, Font f) : base(label, s)
         {
             font = f;
@@ -500,9 +627,9 @@ namespace a4label
             SizeF size = canvas.MeasureString(txt, font);
             canvas.DrawString(txt, font, Brushes.Black, X - size.Width / 2, Y - size.Height / 2);
         }
-
     }
 
+    // Printable line item
     public class Line : Printable
     {
         internal float X2, Y2;
@@ -529,9 +656,9 @@ namespace a4label
         {
             canvas.DrawLine(pen, X, Y, X2, Y2);
         }
-
     }
 
+    // Printable circle item
     public class Circle : Printable
     {
         internal float rad;
@@ -557,9 +684,9 @@ namespace a4label
         {
             canvas.DrawEllipse(pen, X - rad, Y - rad, rad * 2, rad * 2);
         }
-
     }
 
+    // Printable QR code item
     public class QRCode : Printable
     {
         internal float size;
@@ -578,7 +705,6 @@ namespace a4label
 
         public override void draw(Graphics canvas)
         {
-
             var writer = new BarcodeWriter();
             writer.Format = BarcodeFormat.QR_CODE;
             writer.Options = new QrCodeEncodingOptions
@@ -594,14 +720,13 @@ namespace a4label
             Bitmap bmp = new Bitmap(writer.Write(s.Trim()));
             canvas.DrawImage(bmp, X - size / 2, Y - size / 2, size, size);
         }
-
     }
 
+    // Printable graphic file item
     public class GraphicFile : Printable
     {
         internal float W, H;
         Bitmap bmp;
-
 
         public GraphicFile(LabelLayout label, string s) : base(label, s)
         { }
@@ -625,12 +750,11 @@ namespace a4label
                 canvas.DrawLine(Pens.Red, X, Y, X + H, Y + W);
                 canvas.DrawLine(Pens.Red, X, Y + H, X + W, Y);
                 canvas.DrawRectangle(Pens.Red, X, Y, W, H);
-
             }
         }
-
     }
 
+    // Printable offset item (translates the canvas)
     public class Offset : Printable
     {
         public Offset(LabelLayout label, string s) : base(label, s)
@@ -647,19 +771,18 @@ namespace a4label
         {
             canvas.TranslateTransform(X, Y);
         }
-
     }
 
-
+    // Record of a printed label range
     public class PrintRecord : Object
     {
-        string date;
-        public int start, end;
-        public string version = "";
+        string date; // Date/time of print
+        public decimal start, end; // Serial number range
+        public string version = ""; // Version string
 
+        // Parses a print record from a string
         public PrintRecord(string ln) : base()
         {
-
             if (ln.StartsWith("PRINTED:"))
                 ln = ln.Substring(8);
             string[] s = ln.Split(' ');
@@ -667,33 +790,33 @@ namespace a4label
                 throw new Exception("Expected PRINTED:date time nn-nn comment");
             date = s[0] + " " + s[1];
             string[] num = s[2].Split('-');
-            int.TryParse(num[0], out start);
-            int.TryParse(num[1], out end);
+            decimal.TryParse(num[0], out start);
+            decimal.TryParse(num[1], out end);
             if (s.Length >= 4)
                 version = ln.Substring(s[0].Length + s[1].Length + s[2].Length + 3);
             else
                 version = "";
         }
 
-        public PrintRecord(DateTime date, int start, int end, string version) : base()
+        // Creates a print record from parameters
+        public PrintRecord(DateTime date, decimal start, decimal end, string version) : base()
         {
-            this.date = date.ToShortDateString() + " " + date.ToShortTimeString();
+            this.date = date.ToString("dd/MM/yyyy HH:mm"); // Fixed format, no AM/PM
             this.start = start;
             this.end = end;
             this.version = version;
         }
 
-        public bool overlaps(int first, int last)
+        // Checks if this record overlaps with a given range
+        public bool overlaps(decimal first, decimal last)
         {
             return ((first <= end) && (last >= start));
         }
 
+        // Returns a string representation of the record
         public override string ToString()
         {
             return string.Format("{0} {1}-{2} {3}", date, start, end, version);
         }
-
     }
-
-
 }

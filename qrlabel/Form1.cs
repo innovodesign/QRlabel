@@ -1,16 +1,27 @@
-﻿using System;
-using System.Drawing;
-using System.Drawing.Printing;
-using System.Windows.Forms;
-using System.IO;
+﻿using System; // Provides base types and fundamental classes
+using System.Drawing; // For drawing graphics, colors, etc.
+using System.Drawing.Printing; // For printing support
+using System.Windows.Forms; // For Windows Forms UI components
+using System.IO; // For file input/output operations
+using System.Runtime.Remoting.Messaging; // (Unused in this file, can be removed)
+using System.Collections.Generic; // For generic collections like List<T>
+using System.Linq; // For LINQ operations (Skip, Take, etc.)
 
 namespace a4label
 {
+    // Main form for the label printing application
     public partial class Form1 : Form
     {
+        // Instance of the About dialog box
         AboutBox1 aboutBox;
+
+        // Used for delayed settings update (timer)
         int changeTime = 0;
+
+        // Tracks the current page number during printing/preview
         int pageN = 0;
+
+        // Default label layout script (used if no file is loaded)
         const string defaultScript =
             "// 19mm round labels on A4 sheet\r\n" +
             "// Labels-Direct.co.uk SLR19\r\n" +
@@ -27,39 +38,67 @@ namespace a4label
             "text:cx,y-4,[version]\r\n" +
             "text:cx,y-9,[NNNNN]\r\n";
 
+        // Random serial numbers for the run being printed or previewed
+        private List<decimal> randomSerials = new List<decimal>();
 
+        // Tracks which random serial number to use next
+        private int randomSerialIndex = 0;
+
+        // Print preview dialog for showing print layout before printing
+        private PrintPreviewDialog printPreviewDialog1 = new PrintPreviewDialog
+        {
+            AutoScrollMargin = new Size(0, 0),
+            AutoScrollMinSize = new Size(0, 0),
+            ClientSize = new Size(400, 300),
+            Enabled = true,
+            ShowIcon = false,
+            UseAntiAlias = true
+        };
+
+        // Constructor: initializes the form and about box
         public Form1()
         {
-            InitializeComponent();
-            aboutBox = new AboutBox1();
+            InitializeComponent(); // Sets up UI components
+            aboutBox = new AboutBox1(); // Creates About dialog instance
         }
 
+        // Handles form load event: sets up working directory, loads layout, and printer
         private void Form1_Load(object sender, EventArgs e)
         {
+
+            AppSettings.Load();
+            // Get path to user's Documents\label_layout
             string path = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments) + "\\label_layout";
             if (!Directory.Exists(path))
-                Directory.CreateDirectory(path);
+                Directory.CreateDirectory(path); // Create if missing
 
+            // Set working directory and file dialog paths
             Directory.SetCurrentDirectory(path);
             openFileDialog1.InitialDirectory = path;
             saveFileDialog1.InitialDirectory = path;
 
-            string fn = Properties.Settings.Default.filename;
+            // Try to load last used layout file
+            string fn = AppSettings.Filename;
+
             if (File.Exists(fn))
             {
                 loadLog(fn);
             }
-            else if (MessageBox.Show("Cannot load file " + fn + "\nUsing default layout", "Problem") == DialogResult.OK)
+            else
             {
+                if (!string.IsNullOrEmpty(fn))
+                    MessageBox.Show("Cannot load file " + fn + "\nUsing default layout", "Problem");
                 log.Text = defaultScript;
                 ReadSettings();
             }
 
-            string printer = Properties.Settings.Default.printer;
+            // Set up printer
+            string printer = AppSettings.Printer;
             bool foundPrinter = false;
             foreach (string p in PrinterSettings.InstalledPrinters)
                 foundPrinter |= (printer == p);
 
+            // If printer not found, use default or show error
             if (!foundPrinter)
             {
                 if (PrinterSettings.InstalledPrinters.Count == 0)
@@ -70,20 +109,31 @@ namespace a4label
                 {
                     PrinterSettings settings = new PrinterSettings();
                     printer = settings.PrinterName;
-                    Properties.Settings.Default.printer = printer;
-                    Properties.Settings.Default.Save();
+                    AppSettings.Printer = printer;
+                    SaveAppSettings();
 
                     MessageBox.Show("Using printer" + printer);
                 }
             }
             printDocument1.PrinterSettings.PrinterName = printer;
-            SetTitle();
+
+            // Ensure printDocument1 uses A4 page size
+            printDocument1.DefaultPageSettings.PaperSize = new PaperSize("A4", 827, 1169); // 827x1169 hundredths of an inch = 210x297mm
+            printDocument1.DefaultPageSettings.Landscape = false; // Set to true if you want landscape
+
+            SetTitle(); // Update window title
         }
 
+        // Handles changes to serial number range controls
         private void numericUpDown_ValueChanged(object sender, EventArgs e)
         {
-            labelLayout1.setRange((int)numericUpDown1.Value, (int)numericUpDown2.Value);
-            label1.Text = labelLayout1.pageFit();
+            // Update label layout with new range
+            labelLayout1.setRange((long)numericUpDown1.Value, (long)numericUpDown2.Value);
+
+            // Update page fit info
+            label1.Text = labelLayout1.pageFit(checkBoxRandomSN.Checked);
+
+            // Enable/disable print button based on validity
             if (labelLayout1.canPrint())
             {
                 buttonPrint.Enabled = true;
@@ -96,45 +146,68 @@ namespace a4label
                 buttonPrint.Text = "Invalid serial number\r\nSee layout script";
                 buttonPrint.ForeColor = Color.Red;
             }
-            setLabelErrors();
+            setLabelErrors(); // Show any layout errors
         }
 
-
-
+        // Handles opening a layout file
         private void openToolStripMenuItem_Click(object sender, EventArgs e)
         {
             if (openFileDialog1.ShowDialog() == DialogResult.OK)
             {
-                Properties.Settings.Default.filename = openFileDialog1.FileName;
-                Properties.Settings.Default.Save();
+                AppSettings.Filename = openFileDialog1.FileName;
+                SaveAppSettings();
                 loadLog(openFileDialog1.FileName);
                 SetTitle();
             }
         }
 
-        private void SetTitle()
+        // True once the user has been told that the settings could not be saved
+        private bool settingsSaveWarned = false;
+
+        // Saves the application settings. A failure (typically: the settings file belongs
+        // to another Windows user) is reported once per session and otherwise ignored, so
+        // it never blocks opening a layout or printing.
+        private void SaveAppSettings()
         {
-            this.Text = Properties.Settings.Default.filename + "  :  " + Properties.Settings.Default.printer;
+            if (AppSettings.Save() || settingsSaveWarned)
+                return;
+            settingsSaveWarned = true;
+            MessageBox.Show("Could not save settings to " + AppSettings.SettingsPath + "\n" +
+                AppSettings.LastError + "\n\nThe printer and layout file choice will not be remembered.",
+                "Settings", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 
+        // Updates the window title with current file and printer
+        private void SetTitle()
+        {
+            this.Text = AppSettings.Filename + "  :  " + AppSettings.Printer;
+        }
+
+        // Reads settings from the layout script and updates UI
         private void ReadSettings()
         {
             labelLayout1.readSettings(log.Text);
             setLabelErrors();
-            listBoxHistory.Items.AddRange(labelLayout1.history.ToArray());
+
+            listBoxHistory.Items.Clear();
+            if (!labelLayout1.randomSerialNumber)
+                listBoxHistory.Items.AddRange(labelLayout1.history.ToArray());
+
+            checkBoxRandomSN.Checked = labelLayout1.randomSerialNumber;
+            checkBoxRandomSN_CheckedChanged(null, null);
+            textBoxVersion.Text = labelLayout1.lastPrintedVersion;
         }
 
-
+        // Displays layout errors and overlaps in the UI
         private void setLabelErrors()
         {
             labelErrors.Text = string.Join("\r\n", labelLayout1.errors);
             if ((labelLayout1.errors.Count > 0) && (labelLayout1.overlaps.Count > 0))
                 labelErrors.Text += "\r\n";
             labelErrors.Text += string.Join("\r\n", labelLayout1.overlaps);
-
         }
 
-
+        // Loads a layout script from file
         private void loadLog(string filename)
         {
             try
@@ -149,44 +222,42 @@ namespace a4label
             }
 
             ReadSettings();
-            numericUpDown1.Value = labelLayout1.lastPrintedSerno + 1;
-            textBoxVersion.Text = labelLayout1.lastPrintedVersion;
         }
 
-
+        // Handles Save button click
         private void buttonSave_Click(object sender, EventArgs e)
         {
             Save();
         }
 
-
+        // Saves the current layout script to file
         private void Save()
         {
             try
             {
-                StreamWriter sw = new StreamWriter(Properties.Settings.Default.filename);
+                StreamWriter sw = new StreamWriter(AppSettings.Filename);
                 sw.Write(log.Text);
                 sw.Close();
             }
             catch (Exception e)
             {
-                MessageBox.Show(e.Message, Properties.Settings.Default.filename);
+                MessageBox.Show(e.Message, AppSettings.Filename);
             }
         }
 
-
+        // Handles Save menu item click
         private void saveToolStripMenuItem_Click(object sender, EventArgs e)
         {
-            saveFileDialog1.FileName = Properties.Settings.Default.filename;
+            saveFileDialog1.FileName = AppSettings.Filename;
             if (saveFileDialog1.ShowDialog() == DialogResult.OK)
             {
-                Properties.Settings.Default.filename = saveFileDialog1.FileName;
-                Properties.Settings.Default.Save();
+                AppSettings.Filename = saveFileDialog1.FileName;
+                SaveAppSettings();
                 Save();
             }
         }
 
-
+        // Saves settings if version or layout changed
         private void SaveSettings()
         {
             string old = log.Text;
@@ -198,7 +269,7 @@ namespace a4label
                 Save();
         }
 
-
+        // Timer tick event for delayed settings update
         private void timer1_Tick(object sender, EventArgs e)
         {
             if (changeTime > 0)
@@ -209,46 +280,68 @@ namespace a4label
                 }
         }
 
-
+        // Handles changes to the layout script textbox
         private void log_TextChanged(object sender, EventArgs e)
         {
             if (checkBoxUnlock.Checked)
-                changeTime = 30;
+                changeTime = 30; // Start timer for delayed update
         }
 
-
+        // Handles unlock checkbox for editing layout script
         private void checkBox1_CheckedChanged(object sender, EventArgs e)
         {
             log.ReadOnly = !checkBoxUnlock.Checked;
         }
 
+        // Handles Change Printer menu item click
+        private void changePrinterToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            if (printDialog1.ShowDialog() == DialogResult.OK)
+            {
+                printDocument1.PrinterSettings.PrinterName = printDialog1.PrinterSettings.PrinterName;
+                AppSettings.Printer = printDialog1.PrinterSettings.PrinterName;
+                SaveAppSettings();
+                SetTitle();
+                MessageBox.Show("Printer changed to: " + AppSettings.Printer, "Printer", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+        }
 
+        // Handles printer selection from menu
         private void PrintToolStripMenuItem_Click(object sender, EventArgs e)
         {
             DialogResult dr = printDialog1.ShowDialog();
-            if (dr== DialogResult.OK)
+            if (dr == DialogResult.OK)
             {
                 printDocument1.PrinterSettings.PrinterName = printDialog1.PrinterSettings.PrinterName;
                 printDocument1.PrinterSettings.Copies = printDialog1.PrinterSettings.Copies;
-                Properties.Settings.Default.printer = printDialog1.PrinterSettings.PrinterName;
-                Properties.Settings.Default.Save();
+                AppSettings.Printer = printDialog1.PrinterSettings.PrinterName;
+                SaveAppSettings();
                 SetTitle();
             }
         }
 
-
+        // Handles Print button click
         private void buttonPrint_Click(object sender, EventArgs e)
         {
-            printDocument1.Print();
+            DialogResult dr = printDialog1.ShowDialog();
+            if (dr == DialogResult.OK)
+            {
+                printDocument1.PrinterSettings.PrinterName = printDialog1.PrinterSettings.PrinterName;
+                printDocument1.PrinterSettings.Copies = printDialog1.PrinterSettings.Copies;
+                AppSettings.Printer = printDialog1.PrinterSettings.PrinterName;
+                SaveAppSettings();
+                SetTitle();
+                printDocument1.Print();
+            }
         }
 
-
+        // Handles page settings query (not used here)
         private void printDocument1_QueryPageSettings(object sender, QueryPageSettingsEventArgs e)
         {
-
+            // No custom page settings
         }
 
-
+        // Handles start of printing (records history if printing to printer)
         private void printDocument1_BeginPrint(object sender, PrintEventArgs e)
         {
             pageN = 0;
@@ -259,16 +352,22 @@ namespace a4label
                 log.Text += labelLayout1.addHistory() + "\r\n";
                 Save();
             }
+
+            // Generate random serials if needed
+            if (checkBoxRandomSN.Checked)
+            {
+                int totalLabels = (int)numericUpDown2.Value;
+                GenerateRandomSerials(totalLabels);
+            }
         }
 
-
+        // Handles printing each page (and preview)
         private void printDocument1_PrintPage(object sender, PrintPageEventArgs e)
         {
             pageN++;
-            int start = (int)numericUpDown1.Value;
+            decimal start = numericUpDown1.Value;
 
             int labelsPerPage = labelLayout1.repeatAcross * labelLayout1.repeatDown;
-
             int n = (int)numericUpDown2.Value;
 
             start = start + (pageN - 1) * labelsPerPage;
@@ -282,35 +381,134 @@ namespace a4label
                 e.HasMorePages = true;
             }
 
-            labelLayout1.drawPage(start, n, e.Graphics);
+            // Do NOT translate for margins; use raw coordinates
+            var g = e.Graphics;
+            // g.TranslateTransform(e.MarginBounds.Left, e.MarginBounds.Top); // <-- Remove this line
+
+            // Print random or sequential serials
+            if (checkBoxRandomSN.Checked)
+            {
+                var pageSerials = randomSerials.Skip(randomSerialIndex).Take(n).ToList();
+                labelLayout1.drawPage(pageSerials, g);
+                randomSerialIndex += pageSerials.Count;
+            }
+            else
+            {
+                labelLayout1.drawPage(start, n, g);
+            }
         }
 
-
+        // Handles version textbox change
         private void TextBoxVersion_TextChanged(object sender, EventArgs e)
         {
             labelLayout1.setVersion(textBoxVersion.Text);
         }
 
-
+        // Handles Print button click (duplicate handler)
         private void ButtonPrint_Click(object sender, EventArgs e)
         {
             printDocument1.Print();
         }
 
-
+        // Handles Exit menu item click
         private void ExitToolStripMenuItem_Click(object sender, EventArgs e)
         {
             this.Close();
         }
 
-
+        // Handles Help menu item click (shows About dialog)
         private void HelpToolStripMenuItem_Click(object sender, EventArgs e)
         {
             aboutBox.Show();
             aboutBox.BringToFront();
         }
 
+        // Handles random serial number checkbox change
+        private void checkBoxRandomSN_CheckedChanged(object sender, EventArgs e)
+        {
+            // numericUpDown1.Maximum = labelLayout1.validSerialMax;
+            // numericUpDown1.Minimum = labelLayout1.validSerialMin;
+            if (checkBoxRandomSN.Checked)
+            {
+                nextRandom();
+                numericUpDown1.Enabled = false;
+            }
+            else
+            {
+                numericUpDown1.Enabled = true;
+                decimal n = labelLayout1.lastPrintedSerno + 1;
+                numericUpDown1.Maximum = Math.Max(labelLayout1.validSerialMax, n);
+                numericUpDown1.Minimum = Math.Min(labelLayout1.validSerialMin, n);
+                numericUpDown1.Value = n;
+            }
+        }
+
+        // Handles label layout click (for random serial number mode)
+        private void labelLayout1_Click(object sender, EventArgs e)
+        {
+            if (checkBoxRandomSN.Checked)
+                nextRandom();
+        }
+
+        // Sets next random serial number in the UI
+        private void nextRandom()
+        {
+            decimal n = labelLayout1.makeRandom();
+            numericUpDown1.Maximum = n;
+            numericUpDown1.Minimum = n;
+            numericUpDown1.Value = n;
+        }
+
+        // Generates the random serial numbers for a print or preview run.
+        // They are not checked for duplicates.
+        private void GenerateRandomSerials(int count)
+        {
+            randomSerials.Clear();
+            randomSerialIndex = 0;
+
+            for (int i = 0; i < count; i++)
+                randomSerials.Add(labelLayout1.makeRandom());
+        }
+
+        // Handles Print Preview menu item click
+        private void printPreviewToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            ShowPrintPreview();
+        }
+
+        // Shows the print preview dialog
+        private void ShowPrintPreview()
+        {
+            try
+            {
+                // Reset page counter
+                pageN = 0;
+
+                // Generate random serials if needed
+                if (checkBoxRandomSN.Checked)
+                {
+                    int totalLabels = (int)numericUpDown2.Value;
+                    GenerateRandomSerials(totalLabels);
+                    randomSerialIndex = 0;  // Reset index for preview
+                }
+
+                // Configure and show preview
+                printPreviewDialog1.Document = printDocument1;
+                printPreviewDialog1.WindowState = FormWindowState.Maximized;
+                printPreviewDialog1.PrintPreviewControl.Zoom = 1.0;  // Set initial zoom to 100%
+                printPreviewDialog1.ShowDialog();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Print preview failed: " + ex.Message, "Preview Error",
+                               MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // Handles Print Preview button click (if present)
+        private void buttonPreview_Click(object sender, EventArgs e)
+        {
+            ShowPrintPreview();
+        }
     }
-
-
 }
